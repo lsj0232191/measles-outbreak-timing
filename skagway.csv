@@ -1,0 +1,17 @@
+Year,Month Number,Month,Foreign Originating,Foreign Returning,U.S. Citizen Originating,U.S. Citizen Returning
+2025,7,July,1,0,0,0
+2025,3,March,0,0,0,1
+2024,7,July,0,0,0,2
+2024,3,March,0,0,1,0
+2023,8,August,0,0,1,0
+2023,6,June,1,0,0,0
+2023,5,May,0,0,0,1
+2022,8,August,1,0,0,0
+2022,7,July,0,2,0,1
+2022,6,June,0,0,0,5
+2022,5,May,0,0,0,1
+2020,12,December,1,0,0,0
+2019,9,September,0,0,1,0
+2019,8,August,3,0,0,0
+2019,7,July,2,0,1,4
+2019,6,June,0,0,1,5
