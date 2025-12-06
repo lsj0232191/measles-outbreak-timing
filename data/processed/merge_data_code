@@ -1,0 +1,333 @@
+import pandas as pd
+import numpy as np
+from pathlib import Path
+import glob, os, re
+
+# -----------------------------
+# Helper logger
+# -----------------------------
+def log(msg):
+    print(f"[INFO] {msg}")
+
+BASE_DIR = Path(__file__).resolve().parent
+
+ACS_FILE = BASE_DIR / "ACS_merged_for_measles (1).csv"
+OUTBREAK_FILE = BASE_DIR / "measles_county_all_updates.csv"
+
+VACC_FILES = [
+    BASE_DIR / "Vaccination Coverage Adolescents (1).csv",
+    BASE_DIR / "Vaccination Coverage And Exemptions Among Kindergartners (1).csv",
+    BASE_DIR / "Vaccination Coverage Up to 24 Months (1).csv",
+]
+
+GOOGLE_TRENDS_FILE = BASE_DIR / "multiTimeline.csv"
+
+# put all county-level importation CSVs in this folder
+IMPORT_DIR = BASE_DIR / "importation_data"
+
+OUTPUT_FILE = BASE_DIR / "merged_county_month_panel.csv"
+
+# fips inspector
+def inspect_fips(path):
+    try:
+        df = pd.read_csv(path, nrows=5)
+    except Exception as e:
+        log(f"Could not read {path}: {e}")
+        return
+
+    cols = [c.lower() for c in df.columns]
+    fips_like = [c for c in df.columns if "fips" in c.lower()]
+    log(f"Inspecting {path.name}")
+    log(f"  Columns: {df.columns.tolist()}")
+    if fips_like:
+        log(f"  FIPS-like columns: {fips_like}")
+    elif any("geo_id" in c for c in cols):
+        log("  ℹ️ Has GEO_ID; we can derive FIPS from last 5 characters.")
+    elif any("location_id" in c for c in cols):
+        log("  ℹ️ Has location_id; we can zero-pad to get FIPS.")
+    else:
+        log("  ⚠️ No obvious FIPS column. May need mapping or filename-based inference.")
+
+# inspect key files
+inspect_fips(ACS_FILE)
+inspect_fips(OUTBREAK_FILE)
+for vf in VACC_FILES:
+    if vf.exists():
+        inspect_fips(vf)
+if GOOGLE_TRENDS_FILE.exists():
+    inspect_fips(GOOGLE_TRENDS_FILE)
+
+#acs, fips, state name
+log("Loading ACS...")
+acs = pd.read_csv(ACS_FILE, dtype={"GEO_ID": str})
+
+if "FIPS" not in acs.columns:
+    if "GEO_ID" in acs.columns:
+        acs["FIPS"] = acs["GEO_ID"].str[-5:]
+        log("  Derived FIPS from GEO_ID.")
+    else:
+        raise ValueError("ACS file must have GEO_ID or FIPS to create county codes.")
+
+acs["FIPS"] = acs["FIPS"].astype(str).str.zfill(5)
+acs = acs.drop_duplicates(subset="FIPS")
+
+# derive state name from NAME like "Albany County, New York"
+if "NAME" in acs.columns:
+    acs["state_name"] = acs["NAME"].apply(lambda x: x.split(",")[-1].strip().title())
+else:
+    # if NAME doesn't exist, you’d need a separate FIPS→state mapping
+    acs["state_name"] = np.nan
+    log("⚠️ ACS has no NAME column; state_name left as NaN. Vaccination merge may fail.")
+
+# outbreak data
+log("Loading outbreak data...")
+outbreak = pd.read_csv(OUTBREAK_FILE, dtype={"location_id": str})
+
+# keep lab-confirmed cases only (adjust if needed)
+if "outcome_type" in outbreak.columns:
+    outbreak = outbreak[outbreak["outcome_type"] == "case_lab-confirmed"]
+
+# date & FIPS
+outbreak["date"] = pd.to_datetime(outbreak["date"], errors="coerce")
+if "FIPS" not in outbreak.columns:
+    if "location_id" in outbreak.columns:
+        outbreak["FIPS"] = outbreak["location_id"].str.zfill(5)
+        log("  Derived FIPS from location_id.")
+    else:
+        raise ValueError("Outbreak file must have either FIPS or location_id.")
+
+outbreak["FIPS"] = outbreak["FIPS"].astype(str).str.zfill(5)
+outbreak["cases"] = pd.to_numeric(outbreak["value"], errors="coerce").fillna(0)
+
+outbreak["month_period"] = outbreak["date"].dt.to_period("M")
+outbreak["year"] = outbreak["date"].dt.year
+outbreak["month"] = outbreak["date"].dt.month
+
+# aggregate to county×month
+panel = (
+    outbreak.groupby(["FIPS", "month_period", "year", "month"], as_index=False)["cases"]
+    .sum()
+)
+log(f"  Outbreak panel has {len(panel)} county-month rows with at least 1 case row.")
+
+# create full grid of counties × months (to include zeros / non-outbreak months)
+all_months = pd.period_range(panel["month_period"].min(),
+                             panel["month_period"].max(),
+                             freq="M")
+all_counties = acs["FIPS"].unique()
+
+panel_full = (
+    pd.MultiIndex.from_product([all_counties, all_months],
+                               names=["FIPS", "month_period"])
+    .to_frame(index=False)
+)
+
+panel = panel_full.merge(
+    panel[["FIPS", "month_period", "year", "month", "cases"]],
+    on=["FIPS", "month_period"],
+    how="left",
+)
+
+panel["cases"] = panel["cases"].fillna(0)
+panel["year"] = panel["year"].fillna(panel["month_period"].dt.year).astype(int)
+panel["month"] = panel["month"].fillna(panel["month_period"].dt.month).astype(int)
+
+# binary event indicator
+panel["event"] = (panel["cases"] > 0).astype(int)
+
+# time index starting at 1
+panel = panel.sort_values(["month_period"])
+panel["month_index"] = panel["month_period"].rank(method="dense").astype(int)
+
+# ACS demographics
+log("Merging ACS demographics...")
+demo_cols = [c for c in acs.columns if c.startswith(("DP02_", "DP03_", "DP04_", "DP05_"))]
+acs_demo = acs[["FIPS", "state_name"] + demo_cols]
+
+panel = panel.merge(acs_demo, on="FIPS", how="left")
+
+# vaccination data
+log("Processing vaccination files...")
+vacc_frames = []
+
+for vf in VACC_FILES:
+    if not vf.exists():
+        log(f"  Skipping missing file: {vf.name}")
+        continue
+
+    df = pd.read_csv(vf)
+    lower_cols = [c.lower() for c in df.columns]
+
+    # We only keep rows related to MMR if a vaccine column exists
+    vacc_col_candidates = [c for c in df.columns
+                           if "vaccine" in c.lower() or "antigen" in c.lower()]
+    if vacc_col_candidates:
+        vacc_col = vacc_col_candidates[0]
+        df = df[df[vacc_col].str.contains("mmr", case=False, na=False)]
+
+    # try to find state / geography column
+    state_cols = [c for c in df.columns
+                  if any(k in c.lower() for k in ["state", "jurisdiction", "geography", "location"])]
+    year_cols = [c for c in df.columns if "year" in c.lower()]
+    cov_cols = [c for c in df.columns
+                if any(k in c.lower() for k in ["coverage", "estimate", "percent"])]
+
+    if not (state_cols and cov_cols):
+        log(f"  ⚠️ {vf.name} has no obvious state+coverage columns, skipping.")
+        continue
+
+    use_cols = [state_cols[0], cov_cols[0]]
+    if year_cols:
+        use_cols.append(year_cols[0])
+
+    sub = df[use_cols].copy()
+
+    # rename to standard
+    new_names = ["state_name", "vacc_coverage"] + (["year"] if len(use_cols) == 3 else [])
+    sub.columns = new_names[:len(use_cols)]
+
+    # year fallback
+    if "year" not in sub.columns:
+        # if the file is single-year, hard-code or extract from metadata
+        # adjust this default if needed
+        sub["year"] = 2023
+
+    # clean coverage: strip % and "<1"
+    sub["vacc_coverage"] = (
+        sub["vacc_coverage"].astype(str)
+        .str.replace("%", "", regex=False)
+        .str.replace("<1", "0.5", regex=False)
+    )
+    sub["vacc_coverage"] = pd.to_numeric(sub["vacc_coverage"], errors="coerce")
+
+    # standardize state names
+    sub["state_name"] = sub["state_name"].astype(str).str.strip().str.title()
+
+    vacc_frames.append(sub)
+
+if vacc_frames:
+    vacc = pd.concat(vacc_frames, ignore_index=True)
+    vacc = (
+        vacc.groupby(["state_name", "year"], as_index=False)["vacc_coverage"]
+        .mean()
+    )
+    log(f"  Combined vaccination table has {len(vacc)} state-year rows.")
+
+    # merge onto panel: broadcast state-level coverage to counties
+    panel = panel.merge(vacc, on=["state_name", "year"], how="left")
+else:
+    panel["vacc_coverage"] = np.nan
+    log("⚠️ No vaccination coverage merged; vacc_coverage is all NaN.")
+
+# google trends
+log("Processing Google Trends...")
+if GOOGLE_TRENDS_FILE.exists():
+    gt = pd.read_csv(GOOGLE_TRENDS_FILE, skiprows=1)
+    gt.columns = [c.strip() for c in gt.columns]
+
+    date_col = "Month"
+    # adjust if you used a different query name
+    val_col_candidates = [c for c in gt.columns if "measles" in c.lower()]
+    if not val_col_candidates:
+        raise ValueError("Could not find a measles column in Google Trends file.")
+    val_col = val_col_candidates[0]
+
+    gt[date_col] = pd.to_datetime(gt[date_col], errors="coerce")
+
+    gt[val_col] = gt[val_col].replace("<1", 0.5)
+    gt[val_col] = pd.to_numeric(gt[val_col], errors="coerce")
+
+    gt["month_period"] = gt[date_col].dt.to_period("M")
+    gt_monthly = (
+        gt.groupby("month_period", as_index=False)[val_col]
+        .mean()
+        .rename(columns={val_col: "google_trend"})
+    )
+
+    # national-level series; same value for all counties per month
+    panel = panel.merge(gt_monthly, on="month_period", how="left")
+    log(f"  Added Google Trends for {len(gt_monthly)} months.")
+else:
+    panel["google_trend"] = np.nan
+    log("⚠️ Google Trends file not found; google_trend set to NaN.")
+
+# importation/international passengers
+log("Processing importation data...")
+import_frames = []
+
+if IMPORT_DIR.exists():
+    for path in glob.glob(str(IMPORT_DIR / "*.csv")):
+        df = pd.read_csv(path)
+
+        # derive FIPS from column or filename
+        if "FIPS" in df.columns:
+            df["FIPS"] = df["FIPS"].astype(str).str.zfill(5)
+        else:
+            m = re.search(r"(\d{5})", os.path.basename(path))
+            if m:
+                df["FIPS"] = m.group(1)
+                log(f"  Inferred FIPS {m.group(1)} from filename {os.path.basename(path)}")
+            else:
+                log(f"  ⚠️ {os.path.basename(path)} has no FIPS column and no 5-digit code in filename; skipping.")
+                continue
+
+        # unify year/month
+        if "Year" in df.columns:
+            df["year"] = df["Year"].astype(int)
+        elif "year" in df.columns:
+            df["year"] = df["year"].astype(int)
+        else:
+            log(f"  ⚠️ {os.path.basename(path)} missing Year column; skipping.")
+            continue
+
+        if "Month Number" in df.columns:
+            df["month"] = df["Month Number"].astype(int)
+        elif "month" in df.columns:
+            df["month"] = df["month"].astype(int)
+        else:
+            log(f"  ⚠️ {os.path.basename(path)} missing Month/Month Number; skipping.")
+            continue
+
+        # compute simple importation exposure metric
+        fo_cols = [c for c in df.columns if "foreign" in c.lower()]
+        us_cols = [c for c in df.columns if "u.s. citizen" in c.lower()]
+
+        if not fo_cols and not us_cols:
+            log(f"  ⚠️ {os.path.basename(path)} has no passenger count columns; skipping.")
+            continue
+
+        total = 0
+        for c in fo_cols + us_cols:
+            total = total + pd.to_numeric(df[c], errors="coerce").fillna(0)
+
+        df["intl_passengers"] = total
+
+        import_frames.append(df[["FIPS", "year", "month", "intl_passengers"]])
+else:
+    log(f"⚠️ Importation directory {IMPORT_DIR} does not exist. No travel exposure added.")
+
+if import_frames:
+    importation = pd.concat(import_frames, ignore_index=True)
+    importation = (
+        importation.groupby(["FIPS", "year", "month"], as_index=False)["intl_passengers"]
+        .sum()
+    )
+    panel = panel.merge(importation, on=["FIPS", "year", "month"], how="left")
+    log(f"  Added importation data for {len(importation)} county-months.")
+else:
+    panel["intl_passengers"] = 0.0
+    log("  No importation rows merged; intl_passengers set to 0.")
+
+# seasonality
+panel = panel.sort_values(["FIPS", "month_period"])
+panel["sin_season"] = np.sin(2 * np.pi * panel["month"] / 12.0)
+panel["cos_season"] = np.cos(2 * np.pi * panel["month"] / 12.0)
+
+# FOR ADDING LAGS LATER:
+# panel["intl_passengers_lag1"] = panel.groupby("FIPS")["intl_passengers"].shift(1)
+
+# save
+log(f"Saving merged county×month panel to {OUTPUT_FILE} ...")
+panel.to_csv(OUTPUT_FILE, index=False)
+log("Done.")
+
