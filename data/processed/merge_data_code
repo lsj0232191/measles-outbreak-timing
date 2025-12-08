@@ -21,6 +21,7 @@ VACC_FILES = [
 ]
 
 GOOGLE_TRENDS_FILE = BASE_DIR / "multiTimeline.csv"
+GEOMAP_FILE = BASE_DIR / "geoMap.csv"
 
 # put all county-level importation CSVs in this folder
 IMPORT_FILE = BASE_DIR / "import_data_processed.csv"
@@ -42,11 +43,11 @@ def inspect_fips(path):
     if fips_like:
         log(f"  FIPS-like columns: {fips_like}")
     elif any("geo_id" in c for c in cols):
-        log("  Has GEO_ID; we can derive FIPS from last 5 characters.")
+        log(" Has GEO_ID; we can derive FIPS from last 5 characters.")
     elif any("location_id" in c for c in cols):
-        log("  Has location_id; we can zero-pad to get FIPS.")
+        log(" Has location_id; we can zero-pad to get FIPS.")
     else:
-        log("  No obvious FIPS column. May need mapping or filename-based inference.")
+        log(" No obvious FIPS column. May need mapping or filename-based inference.")
 
 # inspect key files
 inspect_fips(ACS_FILE)
@@ -77,7 +78,7 @@ if "NAME" in acs.columns:
 else:
     # if NAME doesn't exist, you’d need a separate FIPS→state mapping
     acs["state_name"] = np.nan
-    log(" ACS has no NAME column; state_name left as NaN. Vaccination merge may fail.")
+    log("ACS has no NAME column; state_name left as NaN. Vaccination merge may fail.")
 
 # outbreak data
 log("Loading outbreak data...")
@@ -173,7 +174,7 @@ for vf in VACC_FILES:
                 if any(k in c.lower() for k in ["coverage", "estimate", "percent"])]
 
     if not (state_cols and cov_cols):
-        log(f"  ⚠️ {vf.name} has no obvious state+coverage columns, skipping.")
+        log(f" {vf.name} has no obvious state+coverage columns, skipping.")
         continue
 
     use_cols = [state_cols[0], cov_cols[0]]
@@ -217,7 +218,7 @@ if vacc_frames:
     panel = panel.merge(vacc, on=["state_name", "year"], how="left")
 else:
     panel["vacc_coverage"] = np.nan
-    log("⚠️ No vaccination coverage merged; vacc_coverage is all NaN.")
+    log("No vaccination coverage merged; vacc_coverage is all NaN.")
 
 # google trends
 log("Processing Google Trends...")
@@ -249,7 +250,126 @@ if GOOGLE_TRENDS_FILE.exists():
     log(f"  Added Google Trends for {len(gt_monthly)} months.")
 else:
     panel["google_trend"] = np.nan
-    log(" Google Trends file not found; google_trend set to NaN.")
+    log("Google Trends file not found; google_trend set to NaN.")
+
+# google Trends DMA-level (geoMap.csv)
+log("Processing Google Trends geoMap (DMA-level, state-level covariates)...")
+if GEOMAP_FILE.exists():
+    try:
+        # Your file has a first row like "Category: All categories"
+        # and the second row has the real headers (DMA, Measles..., MMR..., etc.)
+        gmap = pd.read_csv(GEOMAP_FILE, skiprows=1)
+
+        # Identify columns
+        dma_col_candidates = [c for c in gmap.columns if "dma" in c.lower()]
+        if not dma_col_candidates:
+            log(" geoMap.csv has no DMA column; skipping geoMap merge.")
+        else:
+            dma_col = dma_col_candidates[0]
+
+            # We want four distinct search interest terms:
+            measles_term_col = None
+            mmr_term_col = None
+            measles_virus_col = None
+            koplik_col = None
+
+            for c in gmap.columns:
+                cl = c.lower()
+                if "measles:" in cl and "virus" not in cl and "mmr" not in cl:
+                    measles_term_col = c
+                elif "mmr vaccine" in cl:
+                    mmr_term_col = c
+                elif "measles virus" in cl:
+                    measles_virus_col = c
+                elif "koplik" in cl:
+                    koplik_col = c
+
+            if measles_term_col is None and mmr_term_col is None \
+               and measles_virus_col is None and koplik_col is None:
+                log(" Could not detect measles/MMR-related columns in geoMap.csv; skipping.")
+            else:
+                # Clean percentages
+                interest_cols = [
+                    c
+                    for c in [measles_term_col, mmr_term_col, measles_virus_col, koplik_col]
+                    if c is not None
+                ]
+
+                for col in interest_cols:
+                    gmap[col] = (
+                        gmap[col].astype(str)
+                        .str.replace("%", "", regex=False)
+                        .str.replace("<1", "0.5", regex=False)
+                    )
+                    gmap[col] = pd.to_numeric(gmap[col], errors="coerce")
+
+                # Extract state abbreviation from DMA string (e.g., "Lubbock TX" -> "TX")
+                gmap["state_abbr"] = gmap[dma_col].astype(str).str.extract(r"([A-Z]{2})$")
+
+                # Map state abbreviations to full state names (to match ACS state_name)
+                state_abbr_to_name = {
+                    "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas",
+                    "CA": "California", "CO": "Colorado", "CT": "Connecticut",
+                    "DE": "Delaware", "DC": "District Of Columbia",
+                    "FL": "Florida", "GA": "Georgia", "HI": "Hawaii",
+                    "ID": "Idaho", "IL": "Illinois", "IN": "Indiana",
+                    "IA": "Iowa", "KS": "Kansas", "KY": "Kentucky",
+                    "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
+                    "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota",
+                    "MS": "Mississippi", "MO": "Missouri", "MT": "Montana",
+                    "NE": "Nebraska", "NV": "Nevada", "NH": "New Hampshire",
+                    "NJ": "New Jersey", "NM": "New Mexico", "NY": "New York",
+                    "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio",
+                    "OK": "Oklahoma", "OR": "Oregon", "PA": "Pennsylvania",
+                    "RI": "Rhode Island", "SC": "South Carolina", "SD": "South Dakota",
+                    "TN": "Tennessee", "TX": "Texas", "UT": "Utah",
+                    "VT": "Vermont", "VA": "Virginia", "WA": "Washington",
+                    "WV": "West Virginia", "WI": "Wisconsin", "WY": "Wyoming",
+                }
+
+                gmap["state_name"] = (
+                    gmap["state_abbr"]
+                    .map(state_abbr_to_name)
+                    .astype(str)
+                )
+
+                # Drop rows where we couldn't identify a state
+                gmap = gmap[gmap["state_name"].notna()]
+
+                # Aggregate DMA-level values to state-level averages
+                agg_dict = {}
+                if measles_term_col is not None:
+                    agg_dict[measles_term_col] = "mean"
+                if mmr_term_col is not None:
+                    agg_dict[mmr_term_col] = "mean"
+                if measles_virus_col is not None:
+                    agg_dict[measles_virus_col] = "mean"
+                if koplik_col is not None:
+                    agg_dict[koplik_col] = "mean"
+
+                gmap_state = gmap.groupby("state_name", as_index=False).agg(agg_dict)
+
+                # Rename to nicer column names
+                rename_map = {}
+                if measles_term_col is not None:
+                    rename_map[measles_term_col] = "gt_dma_measles"
+                if mmr_term_col is not None:
+                    rename_map[mmr_term_col] = "gt_dma_mmr_vaccine"
+                if measles_virus_col is not None:
+                    rename_map[measles_virus_col] = "gt_dma_measles_virus"
+                if koplik_col is not None:
+                    rename_map[koplik_col] = "gt_dma_koplik_spots"
+
+                gmap_state = gmap_state.rename(columns=rename_map)
+
+                # Merge onto panel by state_name (time-invariant covariates)
+                panel = panel.merge(gmap_state, on="state_name", how="left")
+                log(f"  Added geoMap-based Google Trends covariates for {len(gmap_state)} states.")
+    except Exception as e:
+        log(f" Failed to process geoMap.csv: {e}")
+else:
+    log(f" geoMap file {GEOMAP_FILE.name} not found; no DMA-based covariates added.")
+
 
 # importation/international passengers (national-level, from import_data_processed.csv)
 log("Processing importation data...")
@@ -288,7 +408,7 @@ if IMPORT_FILE.exists():
     log(f"  Added importation data for {len(imp_month)} year-months (national-level).")
 else:
     panel["intl_passengers"] = 0.0
-    log(f"  Importation file {IMPORT_FILE.name} not found; intl_passengers set to 0.")
+    log(f" Importation file {IMPORT_FILE.name} not found; intl_passengers set to 0.")
 
 # seasonality
 panel = panel.sort_values(["FIPS", "month_period"])
@@ -302,3 +422,4 @@ panel["intl_passengers_lag1"] = panel.groupby("FIPS")["intl_passengers"].shift(1
 log(f"Saving merged county×month panel to {OUTPUT_FILE} ...")
 panel.to_csv(OUTPUT_FILE, index=False)
 log("Done.")
+
