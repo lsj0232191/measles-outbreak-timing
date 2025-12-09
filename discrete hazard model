@@ -1,0 +1,173 @@
+import statsmodels.api as sm
+import numpy as np
+import pandas as pd
+
+
+# 1. Build discrete-time hazard structure
+#    - First outbreak per county = failure
+#    - Counties contribute person-months until first outbreak
+
+# Ensure month_index exists; if not, create it from year/month
+if "month_index" not in panel.columns:
+    if {"year", "month"}.issubset(panel.columns):
+        panel["month_period"] = pd.to_datetime(
+            panel["year"].astype(str) + "-" + panel["month"].astype(str) + "-01"
+        ).dt.to_period("M")
+        panel = panel.sort_values(["month_period"])
+        panel["month_index"] = panel["month_period"].rank(method="dense").astype(int)
+        log("month_index was not found; created from year and month.")
+    else:
+        raise ValueError("Panel must have either month_index or year+month.")
+
+# Sort by county and time
+panel = panel.sort_values(["FIPS", "month_index"])
+
+# Check / define event column
+if "event" not in panel.columns:
+    if "cases" in panel.columns:
+        panel["event"] = (panel["cases"] > 0).astype(int)
+        log("event column not found; created event = 1{cases > 0}.")
+    else:
+        raise ValueError("Panel must have 'event' or 'cases'.")
+
+# First outbreak month per county
+first_event = (
+    panel[panel["event"] == 1]
+    .groupby("FIPS")["month_index"]
+    .min()
+    .rename("event_time")
+)
+
+panel = panel.merge(first_event, on="FIPS", how="left")
+
+# fail = 1 only at FIRST outbreak month per county
+panel["fail"] = (
+    (panel["event"] == 1) &
+    (panel["month_index"] == panel["event_time"])
+).astype(int)
+
+# Risk set: up to first outbreak (inclusive), or all months if never
+risk_mask = panel["event_time"].isna() | (panel["month_index"] <= panel["event_time"])
+panel_hazard = panel.loc[risk_mask].copy()
+
+log(f"Hazard panel shape (risk set): {panel_hazard.shape}")
+log(f"Number of failures (first outbreaks): {panel_hazard['fail'].sum()}")
+
+# 2. Choose covariates: all numeric, but handle missingness
+
+# Columns we NEVER want as predictors
+exclude_cols = {
+    "FIPS",
+    "state_name",
+    "NAME",
+    "GEO_ID",
+    "month_period",
+    "date",
+    "cases",
+    "event",
+    "fail",
+    "event_time",
+}
+
+exclude_cols = exclude_cols.intersection(set(panel_hazard.columns))
+
+# All numeric columns not in exclude set
+all_numeric_covs = [
+    c for c in panel_hazard.columns
+    if c not in exclude_cols and np.issubdtype(panel_hazard[c].dtype, np.number)
+]
+
+log(f"Total numeric covariates found: {len(all_numeric_covs)}")
+
+# Missingness per covariate
+miss_frac = panel_hazard[all_numeric_covs].isna().mean().sort_values()
+
+# Keep only covariates with <= 40% missing
+good_covs = miss_frac[miss_frac <= 0.40].index.tolist()
+log(f"Numeric covariates with <=40% missing: {len(good_covs)}")
+log("Example covariates: " + ", ".join(good_covs[:15]))
+
+# 3. Build modeling DataFrame, impute, drop constant cols
+
+# Keep fail + selected covariates
+df = panel_hazard[good_covs + ["fail"]].copy()
+
+# Just in case: ensure fail has no NAs
+df["fail"] = df["fail"].fillna(0).astype(int)
+
+# Median-impute each covariate
+for c in good_covs:
+    med = df[c].median(skipna=True)
+    df[c] = df[c].fillna(med)
+
+# Drop columns with zero variance (constant after imputation)
+keep_covs = []
+for c in good_covs:
+    if df[c].nunique(dropna=True) > 1:
+        keep_covs.append(c)
+    else:
+        log(f"Dropping constant covariate: {c}")
+
+log(f"Covariates remaining after dropping constants: {len(keep_covs)}")
+
+# Final modeling matrix
+X = df[keep_covs]
+y = df["fail"]
+
+# Sanity check
+log(f"Data used for modeling: X shape = {X.shape}, y length = {len(y)}")
+
+if X.shape[0] == 0:
+    raise ValueError("No rows available for modeling after preprocessing.")
+
+# Add intercept
+X = sm.add_constant(X)
+
+# 4. Fit discrete-time hazard model (cloglog link)
+
+log("Fitting GLM with complementary log-log link (discrete-time hazard model)...")
+
+cloglog_model = sm.GLM(
+    y,
+    X,
+    family=sm.families.Binomial(link=sm.families.links.cloglog())
+)
+
+cloglog_results = cloglog_model.fit()
+log("Model fitting complete.")
+
+print(cloglog_results.summary())
+
+# 5. Extract & rank most influential covariates
+
+coef_table = pd.DataFrame({
+    "variable": cloglog_results.params.index,
+    "coef": cloglog_results.params.values,
+    "pvalue": cloglog_results.pvalues.values,
+})
+
+# Remove intercept
+coef_table = coef_table[coef_table["variable"] != "const"].copy()
+
+# Absolute effect size for ranking
+coef_table["abs_coef"] = coef_table["coef"].abs()
+
+# Sort by absolute coefficient
+top_effects = coef_table.sort_values("abs_coef", ascending=False)
+
+log("Top 25 predictors by absolute effect size:")
+print(top_effects.head(25))
+
+# Statistically significant (p < 0.05)
+sig_effects = top_effects[top_effects["pvalue"] < 0.05]
+
+log("Top 25 statistically significant predictors (p < 0.05) by absolute effect size:")
+print(sig_effects.head(25))
+
+# Save to CSV for inspection
+top_effects.to_csv(BASE_DIR / "hazard_model_all_covariates_ranked.csv", index=False)
+sig_effects.to_csv(BASE_DIR / "hazard_model_significant_covariates_ranked.csv", index=False)
+
+log("Saved ranked covariates to:")
+log("  hazard_model_all_covariates_ranked.csv")
+log("  hazard_model_significant_covariates_ranked.csv")
