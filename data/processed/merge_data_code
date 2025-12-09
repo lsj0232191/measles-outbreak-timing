@@ -3,28 +3,61 @@ import numpy as np
 from pathlib import Path
 import glob, os, re
 
-# -----------------------------
-# Helper logger
-# -----------------------------
+# printing function
 def log(msg):
     print(f"[INFO] {msg}")
+    
+# standardizing function
+def normalize(s):
+    """Lowercase, remove punctuation, collapse spaces."""
+    if pd.isna(s):
+        return ""
+    s = str(s).lower()
+    for ch in [":", "_", "-", "/", ","]:
+        s = s.replace(ch, " ")
+    # keep only letters / digits / spaces
+    s = "".join(ch for ch in s if ch.isalnum() or ch.isspace())
+    # collapse multiple spaces
+    return " ".join(s.split())
+
+# state abbreviations (DMA + importation)
+state_abbr_to_name = {
+    "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas",
+    "CA": "California", "CO": "Colorado", "CT": "Connecticut",
+    "DE": "Delaware", "DC": "District Of Columbia",
+    "FL": "Florida", "GA": "Georgia", "HI": "Hawaii",
+    "ID": "Idaho", "IL": "Illinois", "IN": "Indiana",
+    "IA": "Iowa", "KS": "Kansas", "KY": "Kentucky",
+    "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
+    "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota",
+    "MS": "Mississippi", "MO": "Missouri", "MT": "Montana",
+    "NE": "Nebraska", "NV": "Nevada", "NH": "New Hampshire",
+    "NJ": "New Jersey", "NM": "New Mexico", "NY": "New York",
+    "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio",
+    "OK": "Oklahoma", "OR": "Oregon", "PA": "Pennsylvania",
+    "RI": "Rhode Island", "SC": "South Carolina", "SD": "South Dakota",
+    "TN": "Tennessee", "TX": "Texas", "UT": "Utah",
+    "VT": "Vermont", "VA": "Virginia", "WA": "Washington",
+    "WV": "West Virginia", "WI": "Wisconsin", "WY": "Wyoming",
+}
 
 BASE_DIR = Path(__file__).resolve().parent
 
-ACS_FILE = BASE_DIR / "demographics" / "ACS_merged_for_measles.csv"
-OUTBREAK_FILE = BASE_DIR / "outbreak" / "measles_county_all_updates.csv"
+ACS_FILE = BASE_DIR / "ACS_merged_for_measles (1).csv"
+OUTBREAK_FILE = BASE_DIR / "measles_county_all_updates.csv"
 
 VACC_FILES = [
-    BASE_DIR / "vaccinations" / "Vaccination Coverage Adolescents.csv",
-    BASE_DIR / "vaccinations" / "Vaccination Coverage And Exemptions Among Kindergartners.csv",
-    BASE_DIR / "vaccinations" / "Vaccination Coverage Up to 24 Months.csv",
+    BASE_DIR / "Vaccination Coverage Adolescents (1).csv",
+    BASE_DIR / "Vaccination Coverage And Exemptions Among Kindergartners (1).csv",
+    BASE_DIR / "Vaccination Coverage Up to 24 Months (1).csv",
 ]
 
-GOOGLE_TRENDS_FILE = BASE_DIR/ "google trends" / "multiTimeline.csv"
-GEOMAP_FILE = BASE_DIR / "google trends" / "geoMap.csv"
+GOOGLE_TRENDS_FILE = BASE_DIR / "multiTimeline.csv"
+GEOMAP_FILE = BASE_DIR / "geoMap.csv"
 
 # put all county-level importation CSVs in this folder
 IMPORT_FILE = BASE_DIR / "import_data_processed.csv"
+USAIRPORTS_FILE = BASE_DIR / "usairports.csv"
 
 OUTPUT_FILE = BASE_DIR / "merged_county_month_panel.csv"
 
@@ -43,11 +76,11 @@ def inspect_fips(path):
     if fips_like:
         log(f"  FIPS-like columns: {fips_like}")
     elif any("geo_id" in c for c in cols):
-        log(" Has GEO_ID; we can derive FIPS from last 5 characters.")
+        log("  ℹ️ Has GEO_ID; we can derive FIPS from last 5 characters.")
     elif any("location_id" in c for c in cols):
-        log(" Has location_id; we can zero-pad to get FIPS.")
+        log("  ℹ️ Has location_id; we can zero-pad to get FIPS.")
     else:
-        log(" No obvious FIPS column. May need mapping or filename-based inference.")
+        log("  ⚠️ No obvious FIPS column. May need mapping or filename-based inference.")
 
 # inspect key files
 inspect_fips(ACS_FILE)
@@ -75,10 +108,20 @@ acs = acs.drop_duplicates(subset="FIPS")
 # derive state name from NAME like "Albany County, New York"
 if "NAME" in acs.columns:
     acs["state_name"] = acs["NAME"].apply(lambda x: x.split(",")[-1].strip().title())
+
+    # also derive county name + normalized county for matching
+    acs["county_name_raw"] = acs["NAME"].apply(lambda x: x.split(",")[0])
+    # strip suffixes like "County", "Parish", "Borough", etc., then normalize
+    def clean_county_name(s):
+        s = str(s)
+        for suf in [" County", " Parish", " Borough", " Census Area", " Municipality"]:
+            s = s.replace(suf, "")
+        return normalize(s)
+    acs["county_norm"] = acs["county_name_raw"].apply(clean_county_name)
 else:
-    # if NAME doesn't exist, you’d need a separate FIPS→state mapping
     acs["state_name"] = np.nan
-    log("ACS has no NAME column; state_name left as NaN. Vaccination merge may fail.")
+    acs["county_norm"] = np.nan
+    log("⚠️ ACS has no NAME column; state_name and county_norm left as NaN.")
 
 # outbreak data
 log("Loading outbreak data...")
@@ -174,7 +217,7 @@ for vf in VACC_FILES:
                 if any(k in c.lower() for k in ["coverage", "estimate", "percent"])]
 
     if not (state_cols and cov_cols):
-        log(f" {vf.name} has no obvious state+coverage columns, skipping.")
+        log(f"  ⚠️ {vf.name} has no obvious state+coverage columns, skipping.")
         continue
 
     use_cols = [state_cols[0], cov_cols[0]]
@@ -218,7 +261,7 @@ if vacc_frames:
     panel = panel.merge(vacc, on=["state_name", "year"], how="left")
 else:
     panel["vacc_coverage"] = np.nan
-    log("No vaccination coverage merged; vacc_coverage is all NaN.")
+    log("⚠️ No vaccination coverage merged; vacc_coverage is all NaN.")
 
 # google trends
 log("Processing Google Trends...")
@@ -250,7 +293,7 @@ if GOOGLE_TRENDS_FILE.exists():
     log(f"  Added Google Trends for {len(gt_monthly)} months.")
 else:
     panel["google_trend"] = np.nan
-    log("Google Trends file not found; google_trend set to NaN.")
+    log("⚠️ Google Trends file not found; google_trend set to NaN.")
 
 # google Trends DMA-level (geoMap.csv)
 log("Processing Google Trends geoMap (DMA-level, state-level covariates)...")
@@ -263,7 +306,7 @@ if GEOMAP_FILE.exists():
         # Identify columns
         dma_col_candidates = [c for c in gmap.columns if "dma" in c.lower()]
         if not dma_col_candidates:
-            log(" geoMap.csv has no DMA column; skipping geoMap merge.")
+            log("  ⚠️ geoMap.csv has no DMA column; skipping geoMap merge.")
         else:
             dma_col = dma_col_candidates[0]
 
@@ -286,7 +329,7 @@ if GEOMAP_FILE.exists():
 
             if measles_term_col is None and mmr_term_col is None \
                and measles_virus_col is None and koplik_col is None:
-                log(" Could not detect measles/MMR-related columns in geoMap.csv; skipping.")
+                log("  ⚠️ Could not detect measles/MMR-related columns in geoMap.csv; skipping.")
             else:
                 # Clean percentages
                 interest_cols = [
@@ -305,27 +348,6 @@ if GEOMAP_FILE.exists():
 
                 # Extract state abbreviation from DMA string (e.g., "Lubbock TX" -> "TX")
                 gmap["state_abbr"] = gmap[dma_col].astype(str).str.extract(r"([A-Z]{2})$")
-
-                # Map state abbreviations to full state names (to match ACS state_name)
-                state_abbr_to_name = {
-                    "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas",
-                    "CA": "California", "CO": "Colorado", "CT": "Connecticut",
-                    "DE": "Delaware", "DC": "District Of Columbia",
-                    "FL": "Florida", "GA": "Georgia", "HI": "Hawaii",
-                    "ID": "Idaho", "IL": "Illinois", "IN": "Indiana",
-                    "IA": "Iowa", "KS": "Kansas", "KY": "Kentucky",
-                    "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
-                    "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota",
-                    "MS": "Mississippi", "MO": "Missouri", "MT": "Montana",
-                    "NE": "Nebraska", "NV": "Nevada", "NH": "New Hampshire",
-                    "NJ": "New Jersey", "NM": "New Mexico", "NY": "New York",
-                    "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio",
-                    "OK": "Oklahoma", "OR": "Oregon", "PA": "Pennsylvania",
-                    "RI": "Rhode Island", "SC": "South Carolina", "SD": "South Dakota",
-                    "TN": "Tennessee", "TX": "Texas", "UT": "Utah",
-                    "VT": "Vermont", "VA": "Virginia", "WA": "Washington",
-                    "WV": "West Virginia", "WI": "Wisconsin", "WY": "Wyoming",
-                }
 
                 gmap["state_name"] = (
                     gmap["state_abbr"]
@@ -366,17 +388,19 @@ if GEOMAP_FILE.exists():
                 panel = panel.merge(gmap_state, on="state_name", how="left")
                 log(f"  Added geoMap-based Google Trends covariates for {len(gmap_state)} states.")
     except Exception as e:
-        log(f" Failed to process geoMap.csv: {e}")
+        log(f"  ⚠️ Failed to process geoMap.csv: {e}")
 else:
-    log(f" geoMap file {GEOMAP_FILE.name} not found; no DMA-based covariates added.")
+    log(f"  ⚠️ geoMap file {GEOMAP_FILE.name} not found; no DMA-based covariates added.")
 
 
-# importation/international passengers (national-level, from import_data_processed.csv)
-log("Processing importation data...")
-if IMPORT_FILE.exists():
+# importation/international passengers (COUNTY-level via FIPS)
+log("Processing importation data (county-level)...")
+
+if IMPORT_FILE.exists() and USAIRPORTS_FILE.exists():
+    # 1) Load importation data
     imp = pd.read_csv(IMPORT_FILE)
 
-    # Coerce passenger columns to numeric and compute total intl passengers
+    # numeric passenger columns
     for col in [
         "Foreign Originating",
         "Foreign Returning",
@@ -392,23 +416,92 @@ if IMPORT_FILE.exists():
         + imp["U.S. Citizen Returning"]
     )
 
-    # Aggregate to year × month
-    imp_month = (
-        imp.groupby(["Year", "Month Number"], as_index=False)["intl_passengers"]
+    # normalize __source_title (airport/city label from your processed I-92)
+    imp["title_norm"] = imp["__source_title"].apply(normalize)
+
+    # 2) Load airport → (city, county, state) reference
+    air = pd.read_csv(USAIRPORTS_FILE, dtype=str)
+
+    # keep relevant columns
+    needed_air_cols = [c for c in ["city", "county", "state"] if c in air.columns]
+    air = air[needed_air_cols].dropna()
+
+    air["city_norm"] = air["city"].apply(normalize)
+
+    # one row per (city_norm, state, county)
+    air_city = air.drop_duplicates(subset=["city_norm", "state", "county"]).copy()
+
+    # 3) Map import titles to airport city rows
+    imp = imp.merge(
+        air_city[["city_norm", "state", "county"]],
+        left_on="title_norm",
+        right_on="city_norm",
+        how="left"
+    )
+
+    # map state abbrev to full name to match ACS
+    imp["state_name_air"] = imp["state"].map(state_abbr_to_name)
+
+    # normalize county from airport file for matching to ACS
+    def clean_airport_county(s):
+        s = str(s)
+        for suf in [" County", " Parish", " Borough", " Census Area", " Municipality"]:
+            s = s.replace(suf, "")
+        return normalize(s)
+
+    imp["county_norm_air"] = imp["county"].apply(clean_airport_county)
+
+    # 4) Build ACS lookup: (state_name, county_norm) → FIPS
+    acs_lookup = acs[["FIPS", "state_name", "county_norm"]].dropna().drop_duplicates()
+
+    # merge to get FIPS for each airport
+    imp = imp.merge(
+        acs_lookup,
+        left_on=["state_name_air", "county_norm_air"],
+        right_on=["state_name", "county_norm"],
+        how="left",
+        suffixes=("", "_acs")
+    )
+
+    # how many matched / unmatched?
+    n_total = len(imp)
+    n_matched = imp["FIPS"].notna().sum()
+    log(f"  Importation rows total: {n_total}")
+    log(f"  Importation rows matched to a county FIPS: {n_matched}")
+    log(f"  Importation rows with no FIPS (will be dropped): {n_total - n_matched}")
+
+    # keep only rows with a valid FIPS
+    imp = imp[imp["FIPS"].notna()].copy()
+    imp["FIPS"] = imp["FIPS"].astype(str).str.zfill(5)
+
+    # 5) Aggregate to FIPS × year × month
+    imp["Year"] = pd.to_numeric(imp["Year"], errors="coerce").astype(int)
+    imp["Month Number"] = pd.to_numeric(imp["Month Number"], errors="coerce").astype(int)
+
+    imp_county_month = (
+        imp.groupby(["FIPS", "Year", "Month Number"], as_index=False)["intl_passengers"]
         .sum()
         .rename(columns={"Year": "year", "Month Number": "month"})
     )
 
-    # Merge onto panel: same national-level value for all counties in that month
-    panel = panel.merge(imp_month, on=["year", "month"], how="left")
+    log(f"  Aggregated to {len(imp_county_month)} FIPS-year-month rows of intl_passengers.")
 
-    # For months not covered by import data, set to 0
+    # 6) Merge onto main panel by FIPS + year + month
+    panel = panel.merge(
+        imp_county_month,
+        on=["FIPS", "year", "month"],
+        how="left"
+    )
+
+    # For county-months with no importation data, set intl_passengers = 0
     panel["intl_passengers"] = panel["intl_passengers"].fillna(0.0)
 
-    log(f"  Added importation data for {len(imp_month)} year-months (national-level).")
 else:
     panel["intl_passengers"] = 0.0
-    log(f" Importation file {IMPORT_FILE.name} not found; intl_passengers set to 0.")
+    if not IMPORT_FILE.exists():
+        log(f"  ⚠️ Importation file {IMPORT_FILE.name} not found; intl_passengers set to 0.")
+    if not USAIRPORTS_FILE.exists():
+        log(f"  ⚠️ usairports.csv not found; intl_passengers set to 0.")
 
 # seasonality
 panel = panel.sort_values(["FIPS", "month_period"])
@@ -422,4 +515,3 @@ panel["intl_passengers_lag1"] = panel.groupby("FIPS")["intl_passengers"].shift(1
 log(f"Saving merged county×month panel to {OUTPUT_FILE} ...")
 panel.to_csv(OUTPUT_FILE, index=False)
 log("Done.")
-
