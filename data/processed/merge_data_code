@@ -11,17 +11,17 @@ def log(msg):
 
 BASE_DIR = Path(__file__).resolve().parent
 
-ACS_FILE = BASE_DIR / "ACS_merged_for_measles (1).csv"
-OUTBREAK_FILE = BASE_DIR / "measles_county_all_updates.csv"
+ACS_FILE = BASE_DIR / "demographics" / "ACS_merged_for_measles.csv"
+OUTBREAK_FILE = BASE_DIR / "outbreak" / "measles_county_all_updates.csv"
 
 VACC_FILES = [
-    BASE_DIR / "Vaccination Coverage Adolescents (1).csv",
-    BASE_DIR / "Vaccination Coverage And Exemptions Among Kindergartners (1).csv",
-    BASE_DIR / "Vaccination Coverage Up to 24 Months (1).csv",
+    BASE_DIR / "vaccinations" / "Vaccination Coverage Adolescents.csv",
+    BASE_DIR / "vaccinations" / "Vaccination Coverage And Exemptions Among Kindergartners.csv",
+    BASE_DIR / "vaccinations" / "Vaccination Coverage Up to 24 Months.csv",
 ]
 
-GOOGLE_TRENDS_FILE = BASE_DIR / "multiTimeline.csv"
-GEOMAP_FILE = BASE_DIR / "geoMap.csv"
+GOOGLE_TRENDS_FILE = BASE_DIR/ "google trends" / "multiTimeline.csv"
+GEOMAP_FILE = BASE_DIR / "google trends" / "geoMap.csv"
 
 # put all county-level importation CSVs in this folder
 IMPORT_FILE = BASE_DIR / "import_data_processed.csv"
