@@ -43,8 +43,8 @@ state_abbr_to_name = {
 
 BASE_DIR = Path(__file__).resolve().parent
 
-ACS_FILE = BASE_DIR / "ACS_merged_for_measles.csv"
-OUTBREAK_FILE = BASE_DIR / "measles_county_all_updates.csv"
+ACS_FILE = BASE_DIR / "demographics/ACS_merged_for_measles.csv"
+OUTBREAK_FILE = BASE_DIR / "outbreak/measles_county_all_updates.csv"
 
 VACC_FILES = [
     BASE_DIR / "Vaccination Coverage Adolescents.csv",
