@@ -190,7 +190,8 @@ acs_demo = acs[["FIPS", "state_name"] + demo_cols]
 
 panel = panel.merge(acs_demo, on="FIPS", how="left")
 
-# vaccination data
+# Vaccination data
+
 log("Processing vaccination files...")
 vacc_frames = []
 
@@ -202,12 +203,12 @@ for vf in VACC_FILES:
     df = pd.read_csv(vf)
     lower_cols = [c.lower() for c in df.columns]
 
-    # We only keep rows related to MMR if a vaccine column exists
+    # We only keep rows related to MMR if a vaccine/antigen column exists
     vacc_col_candidates = [c for c in df.columns
                            if "vaccine" in c.lower() or "antigen" in c.lower()]
     if vacc_col_candidates:
         vacc_col = vacc_col_candidates[0]
-        df = df[df[vacc_col].str.contains("mmr", case=False, na=False)]
+        df = df[df[vacc_col].astype(str).str.contains("mmr", case=False, na=False)]
 
     # try to find state / geography column
     state_cols = [c for c in df.columns
@@ -230,10 +231,18 @@ for vf in VACC_FILES:
     new_names = ["state_name", "vacc_coverage"] + (["year"] if len(use_cols) == 3 else [])
     sub.columns = new_names[:len(use_cols)]
 
-    # year fallback
-    if "year" not in sub.columns:
+    # If there's a year col, normalize it to an integer year.
+    # Example: "2023-24" → 2023
+    if "year" in sub.columns:
+        def extract_year(x):
+            s = str(x)
+            # grab first 4-digit year that looks like 20xx
+            m = re.search(r"(20\d{2})", s)
+            return int(m.group(1)) if m else np.nan
+
+        sub["year"] = sub["year"].apply(extract_year)
+    else:
         # if the file is single-year, hard-code or extract from metadata
-        # adjust this default if needed
         sub["year"] = 2023
 
     # clean coverage: strip % and "<1"
@@ -251,14 +260,40 @@ for vf in VACC_FILES:
 
 if vacc_frames:
     vacc = pd.concat(vacc_frames, ignore_index=True)
+
+    # Drop rows with missing year
+    vacc = vacc[vacc["year"].notna()].copy()
+    vacc["year"] = vacc["year"].astype(int)
+
     vacc = (
         vacc.groupby(["state_name", "year"], as_index=False)["vacc_coverage"]
         .mean()
     )
     log(f"  Combined vaccination table has {len(vacc)} state-year rows.")
+    log(f"  Vaccination years (unique): {sorted(vacc['year'].unique())}")
 
-    # merge onto panel: broadcast state-level coverage to counties
-    panel = panel.merge(vacc, on=["state_name", "year"], how="left")
+    # Ensure panel year is integer
+    panel["year"] = panel["year"].astype(int)
+    log(f"  Panel years (unique): {sorted(panel['year'].unique())}")
+
+    # See if we have overlapping years
+    common_years = set(panel["year"].unique()) & set(vacc["year"].unique())
+    log(f"  Overlapping years between panel and vaccination data: {sorted(common_years)}")
+
+    if common_years:
+        # Case A: there ARE overlapping years → merge on state_name & year
+        log("  Merging vaccination on ['state_name', 'year'] (year-specific coverage).")
+        panel = panel.merge(vacc, on=["state_name", "year"], how="left")
+    else:
+        # Case B: NO overlapping years → use latest vaccination year per state
+        log("  ⚠️ No overlapping years; using latest vaccination year per state for all panel years.")
+        vacc_latest = (
+            vacc.sort_values("year")
+                .groupby("state_name", as_index=False)
+                .tail(1)[["state_name", "vacc_coverage"]]
+        )
+        panel = panel.merge(vacc_latest, on="state_name", how="left")
+
 else:
     panel["vacc_coverage"] = np.nan
     log("⚠️ No vaccination coverage merged; vacc_coverage is all NaN.")
