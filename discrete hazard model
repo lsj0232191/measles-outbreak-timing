@@ -11,7 +11,7 @@ def log(msg):
 
 # Path to your merged dataset
 BASE_DIR = Path(__file__).resolve().parent
-MERGED_FILE = BASE_DIR / "merged_county_month_panel.csv"
+MERGED_FILE = BASE_DIR / "data/processed/merged_county_month_panel.csv"
 
 # -------------------------------------------------------------------
 # 1. Load merged dataset
