@@ -47,9 +47,9 @@ ACS_FILE = BASE_DIR / "demographics/ACS_merged_for_measles.csv"
 OUTBREAK_FILE = BASE_DIR / "outbreak/measles_county_all_updates.csv"
 
 VACC_FILES = [
-    BASE_DIR / "Vaccination Coverage Adolescents.csv",
-    BASE_DIR / "Vaccination Coverage And Exemptions Among Kindergartners.csv",
-    BASE_DIR / "Vaccination Coverage Up to 24 Months.csv",
+    BASE_DIR / "vaccinations/Vaccination_Coverage_Adolescents.csv",
+    BASE_DIR / "vaccinations/Vaccination_Coverage_And_Exemptions_Among_Kindergartners.csv",
+    BASE_DIR / "vaccinations/Vaccination_Coverage_Up_to_24_Months.csv",
 ]
 
 GOOGLE_TRENDS_FILE = BASE_DIR / "multiTimeline.csv"
@@ -202,14 +202,12 @@ for vf in VACC_FILES:
     df = pd.read_csv(vf)
     lower_cols = [c.lower() for c in df.columns]
 
-    # We only keep rows related to MMR if a vaccine column exists
     vacc_col_candidates = [c for c in df.columns
                            if "vaccine" in c.lower() or "antigen" in c.lower()]
     if vacc_col_candidates:
         vacc_col = vacc_col_candidates[0]
-        df = df[df[vacc_col].str.contains("mmr", case=False, na=False)]
+        df = df[df[vacc_col].astype(str).str.contains("mmr", case=False, na=False)]
 
-    # try to find state / geography column
     state_cols = [c for c in df.columns
                   if any(k in c.lower() for k in ["state", "jurisdiction", "geography", "location"])]
     year_cols = [c for c in df.columns if "year" in c.lower()]
@@ -226,17 +224,15 @@ for vf in VACC_FILES:
 
     sub = df[use_cols].copy()
 
-    # rename to standard
+    # rename
     new_names = ["state_name", "vacc_coverage"] + (["year"] if len(use_cols) == 3 else [])
     sub.columns = new_names[:len(use_cols)]
 
-    # year fallback
+    # if no year column existed, assume 2023
     if "year" not in sub.columns:
-        # if the file is single-year, hard-code or extract from metadata
-        # adjust this default if needed
         sub["year"] = 2023
 
-    # clean coverage: strip % and "<1"
+    # clean vaccination %
     sub["vacc_coverage"] = (
         sub["vacc_coverage"].astype(str)
         .str.replace("%", "", regex=False)
@@ -244,26 +240,35 @@ for vf in VACC_FILES:
     )
     sub["vacc_coverage"] = pd.to_numeric(sub["vacc_coverage"], errors="coerce")
 
-    # standardize state names
+    # clean state names
     sub["state_name"] = sub["state_name"].astype(str).str.strip().str.title()
+
+    # clean year — this is the CRITICAL FIX
+    sub["year"] = pd.to_numeric(sub["year"], errors="coerce")
+    sub = sub[sub["year"].notna()]
+    sub["year"] = sub["year"].astype(int)
 
     vacc_frames.append(sub)
 
 if vacc_frames:
     vacc = pd.concat(vacc_frames, ignore_index=True)
-    vacc = (
-        vacc.groupby(["state_name", "year"], as_index=False)["vacc_coverage"]
-        .mean()
-    )
+
+    vacc = vacc.groupby(["state_name", "year"], as_index=False)["vacc_coverage"].mean()
+
     log(f"  Combined vaccination table has {len(vacc)} state-year rows.")
 
-    # merge onto panel: broadcast state-level coverage to counties
+    # ensure same dtype for merge
+    panel["year"] = pd.to_numeric(panel["year"], errors="coerce").astype(int)
+    vacc["year"] = pd.to_numeric(vacc["year"], errors="coerce").astype(int)
+
     panel = panel.merge(vacc, on=["state_name", "year"], how="left")
 else:
     panel["vacc_coverage"] = np.nan
     log("⚠️ No vaccination coverage merged; vacc_coverage is all NaN.")
 
-if "vacc" in locals():
+# --- SYNTHETIC 2025 BLOCK ---
+
+if "vacc" in locals() and len(vacc) > 0:
     annual_means = (
         vacc.groupby("year")["vacc_coverage"]
         .mean()
@@ -271,7 +276,9 @@ if "vacc" in locals():
         .sort_values("year")
     )
 else:
-    # fallback if vaccination merging failed — use a neutral constant
+    annual_means = pd.DataFrame({"year": [2024], "vacc_coverage": [93.0]})
+
+if len(annual_means) == 0:
     annual_means = pd.DataFrame({"year": [2024], "vacc_coverage": [93.0]})
 
 annual_2024 = float(annual_means["vacc_coverage"].iloc[-1])
