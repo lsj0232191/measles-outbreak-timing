@@ -47,9 +47,9 @@ ACS_FILE = BASE_DIR / "demographics/ACS_merged_for_measles.csv"
 OUTBREAK_FILE = BASE_DIR / "outbreak/measles_county_all_updates.csv"
 
 VACC_FILES = [
-    BASE_DIR / "Vaccination Coverage Adolescents.csv",
-    BASE_DIR / "Vaccination Coverage And Exemptions Among Kindergartners.csv",
-    BASE_DIR / "Vaccination Coverage Up to 24 Months.csv",
+    BASE_DIR / "vaccinations/Vaccination Coverage Adolescents.csv",
+    BASE_DIR / "vaccinations/Vaccination Coverage And Exemptions Among Kindergartners.csv",
+    BASE_DIR / "vaccinations/Vaccination Coverage Up to 24 Months.csv",
 ]
 
 GOOGLE_TRENDS_FILE = BASE_DIR / "google trends/multiTimeline.csv"
@@ -94,6 +94,8 @@ if GOOGLE_TRENDS_FILE.exists():
 #acs, fips, state name
 log("Loading ACS...")
 acs = pd.read_csv(ACS_FILE, dtype={"GEO_ID": str})
+# drop columns that end with "M"
+acs = acs.drop(columns=acs.filter(regex='M$').columns)
 
 if "FIPS" not in acs.columns:
     if "GEO_ID" in acs.columns:
