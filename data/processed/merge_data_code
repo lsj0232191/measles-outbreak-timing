@@ -52,8 +52,8 @@ VACC_FILES = [
     BASE_DIR / "Vaccination Coverage Up to 24 Months.csv",
 ]
 
-GOOGLE_TRENDS_FILE = BASE_DIR / "multiTimeline.csv"
-GEOMAP_FILE = BASE_DIR / "geoMap.csv"
+GOOGLE_TRENDS_FILE = BASE_DIR / "google trends/multiTimeline.csv"
+GEOMAP_FILE = BASE_DIR / "google trends/geoMap.csv"
 
 # put all county-level importation CSVs in this folder
 IMPORT_FILE = BASE_DIR / "import_data_processed.csv"
