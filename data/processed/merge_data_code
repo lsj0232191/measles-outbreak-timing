@@ -50,8 +50,8 @@ VACC_FILES = [
     BASE_DIR / "vaccinations/Vaccination_Coverage_And_Exemptions_Among_Kindergartners.csv"
 ]
 
-GOOGLE_TRENDS_FILE = BASE_DIR / "multiTimeline.csv"
-GEOMAP_FILE = BASE_DIR / "geoMap.csv"
+GOOGLE_TRENDS_FILE = BASE_DIR / "google trends/multiTimeline.csv"
+GEOMAP_FILE = BASE_DIR / "google trends/geoMap.csv"
 
 # put all county-level importation CSVs in this folder
 IMPORT_FILE = BASE_DIR / "import_data_processed.csv"
@@ -92,6 +92,7 @@ if GOOGLE_TRENDS_FILE.exists():
 #acs, fips, state name
 log("Loading ACS...")
 acs = pd.read_csv(ACS_FILE, dtype={"GEO_ID": str})
+acs = acs.drop(columns=acs.filter(regex='M$').columns)
 
 if "FIPS" not in acs.columns:
     if "GEO_ID" in acs.columns:
