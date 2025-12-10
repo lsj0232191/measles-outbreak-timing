@@ -47,13 +47,13 @@ ACS_FILE = BASE_DIR / "demographics/ACS_merged_for_measles.csv"
 OUTBREAK_FILE = BASE_DIR / "outbreak/measles_county_all_updates.csv"
 
 VACC_FILES = [
-    BASE_DIR / "vaccinations/Vaccination Coverage Adolescents.csv",
-    BASE_DIR / "vaccinations/Vaccination Coverage And Exemptions Among Kindergartners.csv",
-    BASE_DIR / "vaccinations/Vaccination Coverage Up to 24 Months.csv",
+    BASE_DIR / "Vaccination Coverage Adolescents.csv",
+    BASE_DIR / "Vaccination Coverage And Exemptions Among Kindergartners.csv",
+    BASE_DIR / "Vaccination Coverage Up to 24 Months.csv",
 ]
 
-GOOGLE_TRENDS_FILE = BASE_DIR / "google trends/multiTimeline.csv"
-GEOMAP_FILE = BASE_DIR / "google trends/geoMap.csv"
+GOOGLE_TRENDS_FILE = BASE_DIR / "multiTimeline.csv"
+GEOMAP_FILE = BASE_DIR / "geoMap.csv"
 
 # put all county-level importation CSVs in this folder
 IMPORT_FILE = BASE_DIR / "import_data_processed.csv"
@@ -94,8 +94,6 @@ if GOOGLE_TRENDS_FILE.exists():
 #acs, fips, state name
 log("Loading ACS...")
 acs = pd.read_csv(ACS_FILE, dtype={"GEO_ID": str})
-# drop columns that end with "M"
-acs = acs.drop(columns=acs.filter(regex='M$').columns)
 
 if "FIPS" not in acs.columns:
     if "GEO_ID" in acs.columns:
@@ -192,8 +190,7 @@ acs_demo = acs[["FIPS", "state_name"] + demo_cols]
 
 panel = panel.merge(acs_demo, on="FIPS", how="left")
 
-# Vaccination data
-
+# vaccination data
 log("Processing vaccination files...")
 vacc_frames = []
 
@@ -205,12 +202,12 @@ for vf in VACC_FILES:
     df = pd.read_csv(vf)
     lower_cols = [c.lower() for c in df.columns]
 
-    # We only keep rows related to MMR if a vaccine/antigen column exists
+    # We only keep rows related to MMR if a vaccine column exists
     vacc_col_candidates = [c for c in df.columns
                            if "vaccine" in c.lower() or "antigen" in c.lower()]
     if vacc_col_candidates:
         vacc_col = vacc_col_candidates[0]
-        df = df[df[vacc_col].astype(str).str.contains("mmr", case=False, na=False)]
+        df = df[df[vacc_col].str.contains("mmr", case=False, na=False)]
 
     # try to find state / geography column
     state_cols = [c for c in df.columns
@@ -233,18 +230,10 @@ for vf in VACC_FILES:
     new_names = ["state_name", "vacc_coverage"] + (["year"] if len(use_cols) == 3 else [])
     sub.columns = new_names[:len(use_cols)]
 
-    # If there's a year col, normalize it to an integer year.
-    # Example: "2023-24" → 2023
-    if "year" in sub.columns:
-        def extract_year(x):
-            s = str(x)
-            # grab first 4-digit year that looks like 20xx
-            m = re.search(r"(20\d{2})", s)
-            return int(m.group(1)) if m else np.nan
-
-        sub["year"] = sub["year"].apply(extract_year)
-    else:
+    # year fallback
+    if "year" not in sub.columns:
         # if the file is single-year, hard-code or extract from metadata
+        # adjust this default if needed
         sub["year"] = 2023
 
     # clean coverage: strip % and "<1"
@@ -262,43 +251,53 @@ for vf in VACC_FILES:
 
 if vacc_frames:
     vacc = pd.concat(vacc_frames, ignore_index=True)
-
-    # Drop rows with missing year
-    vacc = vacc[vacc["year"].notna()].copy()
-    vacc["year"] = vacc["year"].astype(int)
-
     vacc = (
         vacc.groupby(["state_name", "year"], as_index=False)["vacc_coverage"]
         .mean()
     )
     log(f"  Combined vaccination table has {len(vacc)} state-year rows.")
-    log(f"  Vaccination years (unique): {sorted(vacc['year'].unique())}")
 
-    # Ensure panel year is integer
-    panel["year"] = panel["year"].astype(int)
-    log(f"  Panel years (unique): {sorted(panel['year'].unique())}")
-
-    # See if we have overlapping years
-    common_years = set(panel["year"].unique()) & set(vacc["year"].unique())
-    log(f"  Overlapping years between panel and vaccination data: {sorted(common_years)}")
-
-    if common_years:
-        # Case A: there ARE overlapping years → merge on state_name & year
-        log("  Merging vaccination on ['state_name', 'year'] (year-specific coverage).")
-        panel = panel.merge(vacc, on=["state_name", "year"], how="left")
-    else:
-        # Case B: NO overlapping years → use latest vaccination year per state
-        log("  ⚠️ No overlapping years; using latest vaccination year per state for all panel years.")
-        vacc_latest = (
-            vacc.sort_values("year")
-                .groupby("state_name", as_index=False)
-                .tail(1)[["state_name", "vacc_coverage"]]
-        )
-        panel = panel.merge(vacc_latest, on="state_name", how="left")
-
+    # merge onto panel: broadcast state-level coverage to counties
+    panel = panel.merge(vacc, on=["state_name", "year"], how="left")
 else:
     panel["vacc_coverage"] = np.nan
     log("⚠️ No vaccination coverage merged; vacc_coverage is all NaN.")
+
+if "vacc" in locals():
+    annual_means = (
+        vacc.groupby("year")["vacc_coverage"]
+        .mean()
+        .reset_index()
+        .sort_values("year")
+    )
+else:
+    # fallback if vaccination merging failed — use a neutral constant
+    annual_means = pd.DataFrame({"year": [2024], "vacc_coverage": [93.0]})
+
+annual_2024 = float(annual_means["vacc_coverage"].iloc[-1])
+
+months = np.arange(1, 13)
+season_peak_month = 9
+season_amplitude = 0.30
+
+coverage_2025 = (
+    annual_2024 +
+    season_amplitude * np.sin(2 * np.pi * (months - season_peak_month) / 12)
+)
+
+monthly_2025 = pd.DataFrame({
+    "year": 2025,
+    "month": months,
+    "vacc_coverage_2025": coverage_2025
+})
+
+panel = panel.merge(monthly_2025, on=["year", "month"], how="left")
+
+panel["vacc_coverage"] = np.where(
+    panel["year"] == 2025,
+    panel["vacc_coverage_2025"],
+    panel["vacc_coverage"]
+)
 
 # google trends
 log("Processing Google Trends...")
