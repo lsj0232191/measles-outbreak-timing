@@ -43,13 +43,13 @@ state_abbr_to_name = {
 
 BASE_DIR = Path(__file__).resolve().parent
 
-ACS_FILE = BASE_DIR / "ACS_merged_for_measles (1).csv"
+ACS_FILE = BASE_DIR / "ACS_merged_for_measles.csv"
 OUTBREAK_FILE = BASE_DIR / "measles_county_all_updates.csv"
 
 VACC_FILES = [
-    BASE_DIR / "Vaccination Coverage Adolescents (1).csv",
-    BASE_DIR / "Vaccination Coverage And Exemptions Among Kindergartners (1).csv",
-    BASE_DIR / "Vaccination Coverage Up to 24 Months (1).csv",
+    BASE_DIR / "Vaccination Coverage Adolescents.csv",
+    BASE_DIR / "Vaccination Coverage And Exemptions Among Kindergartners.csv",
+    BASE_DIR / "Vaccination Coverage Up to 24 Months.csv",
 ]
 
 GOOGLE_TRENDS_FILE = BASE_DIR / "multiTimeline.csv"
